@@ -202,4 +202,9 @@ app.post('/text-to-speech', async (req, res) => {
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({ error: 'Something went wrong!', details: err.message });
+
+  export default function handler(req, res) {
+  res.status(200).json({ message: 'Hello from Vercel!' });
+}
+  
 });
