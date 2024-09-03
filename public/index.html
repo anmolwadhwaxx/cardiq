@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speech to Text RAG System</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        textarea { width: 100%; height: 150px; margin-bottom: 10px; }
+        button { margin-right: 10px; }
+        #error { color: red; }
+        #log { font-family: monospace; white-space: pre-wrap; }
+        #visualizer { width: 100%; height: 60px; background-color: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <h1>Speech to Text RAG System</h1>
+
+    <h2>Audio Input Settings</h2>
+    <select id="audioSource"></select>
+    <canvas id="visualizer"></canvas>
+
+    <h2>Reference Information</h2>
+    <textarea id="context" placeholder="Paste your reference information here..."></textarea>
+
+    <h2>Speech Input</h2>
+    <button id="startRecording">Start Recording</button>
+    <button id="stopRecording" disabled>Stop Recording</button>
+    <input type="text" id="manualInput" placeholder="Or type your query here..." />
+    <button id="submitManualInput">Submit Text</button>
+    <p id="transcription">Transcribed Text: </p>
+
+    <h2>RAG Output</h2>
+    <p id="ragOutput"></p>
+    <button id="speakAnswer" disabled>Speak Answer</button>
+
+    <p id="error"></p>
+    <h3>Log</h3>
+    <pre id="log"></pre>
+
+    <script>
+        let mediaRecorder;
+        let audioContext;
+        let analyser;
+        let audioChunks = [];
+        let visualizerCanvas, canvasCtx;
+
+        function log(message) {
+            console.log(message);
+            document.getElementById('log').textContent += message + '\n';
+        }
+
+        // Get available audio inputs
+        async function getAudioInputs() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioInputs = devices.filter(device => device.kind === 'audioinput');
+            const select = document.getElementById('audioSource');
+            select.innerHTML = '';
+            audioInputs.forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.text = device.label || `Microphone ${select.length + 1}`;
+                select.appendChild(option);
+            });
+        }
+
+        // Set up audio context and analyser
+        function setupAudioContext(stream) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(stream);
+            source.connect(analyser);
+            analyser.fftSize = 256;
+            visualize();
+        }
+
+        // Visualize audio input
+        function visualize() {
+            visualizerCanvas = document.getElementById('visualizer');
+            canvasCtx = visualizerCanvas.getContext('2d');
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+
+            function draw() {
+                const WIDTH = visualizerCanvas.width;
+                const HEIGHT = visualizerCanvas.height;
+
+                requestAnimationFrame(draw);
+
+                analyser.getByteFrequencyData(dataArray);
+
+                canvasCtx.fillStyle = 'rgb(200, 200, 200)';
+                canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
+
+                const barWidth = (WIDTH / bufferLength) * 2.5;
+                let barHeight;
+                let x = 0;
+
+                for(let i = 0; i < bufferLength; i++) {
+                    barHeight = dataArray[i] / 2;
+
+                    canvasCtx.fillStyle = `rgb(50,50,${Math.floor(barHeight + 100)})`;
+                    canvasCtx.fillRect(x, HEIGHT - barHeight / 2, barWidth, barHeight);
+
+                    x += barWidth + 1;
+                }
+            }
+
+            draw();
+        }
+
+        document.getElementById('startRecording').onclick = startRecording;
+        document.getElementById('stopRecording').onclick = stopRecording;
+        document.getElementById('submitManualInput').onclick = () => {
+            const manualText = document.getElementById('manualInput').value;
+            document.getElementById('transcription').textContent = 'Transcribed Text: ' + manualText;
+            processRAG(manualText);
+        };
+        document.getElementById('speakAnswer').onclick = speakAnswer;
+
+        async function startRecording() {
+            try {
+                log('Starting recording...');
+                const audioSource = document.getElementById('audioSource').value;
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { deviceId: audioSource ? { exact: audioSource } : undefined }
+                });
+                setupAudioContext(stream);
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.start();
+
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                document.getElementById('startRecording').disabled = true;
+                document.getElementById('stopRecording').disabled = false;
+                log('Recording started');
+            } catch (error) {
+                log('Error starting recording: ' + error.message);
+                document.getElementById('error').textContent = 'Error starting recording: ' + error.message;
+            }
+        }
+
+        function stopRecording() {
+            log('Stopping recording...');
+            mediaRecorder.stop();
+            document.getElementById('startRecording').disabled = false;
+            document.getElementById('stopRecording').disabled = true;
+
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                audioChunks = [];
+                await sendAudioToServer(audioBlob);
+            };
+            log('Recording stopped');
+        }
+
+        async function sendAudioToServer(audioBlob) {
+            try {
+                log('Sending audio to server...');
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'audio.wav');
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const result = await response.json();   
+
+                log('Received transcription: ' + result.text);
+                document.getElementById('transcription').textContent = 'Transcribed Text: ' + result.text;
+                await processRAG(result.text);
+            } catch (error) {
+                log('Error sending audio to server: ' + error.message);
+                document.getElementById('error').textContent = 'Error sending audio to server: ' + error.message;
+            }
+        }
+
+        async function processRAG(query) {
+            try {
+                log('Processing RAG...');
+                const context = document.getElementById('context').value;
+                log('Query: ' + query);
+                log('Context: ' + context);
+                const response = await fetch('/rag', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, context })
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const result = await response.json();
+                log('Received RAG response: ' + result.answer);
+
+                document.getElementById('ragOutput').textContent = result.answer;
+                document.getElementById('speakAnswer').disabled = false;
+            } catch (error) {
+                log('Error processing RAG: ' + error.message);
+                document.getElementById('error').textContent = 'Error processing RAG: ' + error.message;
+            }
+        }
+
+        async function speakAnswer() {
+            try {
+                log('Speaking answer...');
+                const text = document.getElementById('ragOutput').textContent;
+                const response = await fetch('/text-to-speech', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                audio.play();
+                log('Answer spoken');
+            } catch (error) {
+                log('Error in text-to-speech conversion: ' + error.message);
+                document.getElementById('error').textContent = 'Error in text-to-speech conversion: ' + error.message;
+            }
+        }
+
+        // Initialize
+        getAudioInputs();
+    </script>
+</body>
+</html>
